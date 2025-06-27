@@ -1,0 +1,12 @@
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-west-2
+filters:
+  instance-state-name: running
+keyed_groups:
+  - key: tags.Role
+    prefix: ""
+compose:
+  ansible_host: private_ip_address
+  mongodb_master_ip: "{{ groups['_infra_server'][0] | default(groups['infra_server'][0]) | default('localhost') }}"
+  mongodb_replica_ip: "{{ private_ip_address }}"

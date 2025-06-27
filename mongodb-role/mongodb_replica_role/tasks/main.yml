@@ -1,0 +1,132 @@
+---
+- name: Update apt cache
+  apt:
+    update_cache: yes
+
+- name: Install MongoDB
+  apt:
+    name: mongodb-org
+    state: present
+    update_cache: yes
+
+- name: Create data directory
+  file:
+    path: /data/db
+    state: directory
+    owner: mongodb
+    group: mongodb
+    mode: '0755'
+
+- name: Copy mongod.conf template
+  template:
+    src: mongod.conf.j2
+    dest: /etc/mongod.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart MongoDB
+
+- name: Start and enable MongoDB service
+  service:
+    name: mongod
+    state: started
+    enabled: yes
+
+- name: Wait for MongoDB to be ready
+  wait_for:
+    host: localhost
+    port: "{{ mongodb_port }}"
+    timeout: 60
+
+- name: Set MongoDB master and replica IPs
+  set_fact:
+    mongodb_master_ip: "{{ hostvars[groups['_infra_server'][0]]['private_ip_address'] }}"
+    mongodb_replica_ip: "{{ private_ip_address }}"
+  when: "'_infra_server' in groups and groups['_infra_server'] | length > 1"
+
+- name: Create replica set initiation script
+  template:
+    src: rs_init.js.j2
+    dest: /tmp/rs_init.js
+
+- name: Wait until MongoDB is fully ready
+  shell: |
+    for i in {1..30}; do
+      if mongosh --quiet --eval "db.adminCommand('ping')"; then
+        exit 0
+      fi
+      sleep 2
+    done
+    exit 1
+  register: mongo_ready
+  until: mongo_ready.rc == 0
+  retries: 5
+  delay: 10
+  delegate_to: "{{ mongodb_master_ip }}"
+  run_once: true
+
+- name: Initiate MongoDB replica set with retries
+  shell: |
+    mongosh --quiet --host {{ mongodb_master_ip }} --eval "
+      try {
+        rs.initiate({
+          _id: '{{ mongodb_replset }}',
+          version: 1,
+          members: [
+            { _id: 0, host: '{{ mongodb_master_ip }}:27017', priority: 2 },
+            { _id: 1, host: '{{ mongodb_replica_ip }}:27017', priority: 1 }
+          ]
+        })
+      } catch(e) {
+        // If already initialized, force reconfiguration
+        if (e.codeName === 'AlreadyInitialized') {
+          cfg = rs.conf()
+          cfg.members = [
+            { _id: 0, host: '{{ mongodb_master_ip }}:27017', priority: 2 },
+            { _id: 1, host: '{{ mongodb_replica_ip }}:27017', priority: 1 }
+          ]
+          cfg.version++
+          rs.reconfig(cfg, {force: true})
+        } else {
+          throw e
+        }
+      }
+    "
+  register: rs_init
+  until: "'ok' in rs_init.stdout"
+  retries: 5
+  delay: 10
+  delegate_to: "{{ mongodb_master_ip }}"
+  run_once: true
+
+- name: Wait for replica set stabilization
+  shell: |
+    mongosh --quiet --host {{ mongodb_master_ip }} --eval "
+      var status = rs.status();
+      if (status.members && 
+          status.members.some(m => m.stateStr === 'PRIMARY') && 
+          status.members.some(m => m.stateStr === 'SECONDARY') &&
+          status.members.every(m => m.health === 1)) {
+        print('ok');
+      } else {
+        print('not ready');
+      }
+    "
+  register: rs_stable
+  until: "'ok' in rs_stable.stdout"
+  retries: 10
+  delay: 5
+  delegate_to: "{{ mongodb_master_ip }}"
+  run_once: true
+
+- name: Get final replica set status
+  shell: |
+    mongosh --quiet --host {{ mongodb_master_ip }} --eval "JSON.stringify(rs.status(), null, 2)"
+  register: final_status
+  delegate_to: "{{ mongodb_master_ip }}"
+  run_once: true
+  failed_when: false
+
+- name: Show final status
+  debug:
+    var: final_status.stdout

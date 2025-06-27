@@ -1,0 +1,21 @@
+- name: Configure MongoDB Replica Set
+  hosts: _infra_server
+  become: true
+  vars:
+    mongodb_replset: rs0
+  tasks:
+    - name: Set facts for replica set
+      set_fact:
+        mongodb_master_ip: "{{ hostvars[groups['_infra_server'][0]].private_ip_address }}"
+        mongodb_replica_ip: "{{ hostvars[inventory_hostname].private_ip_address }}"
+      run_once: true
+      delegate_to: "{{ groups['_infra_server'][0] }}"
+
+    - name: Include master role on first node
+      include_role:
+        name: mongodb_master_role
+      when: inventory_hostname == groups['_infra_server'][0]
+
+    - name: Include replica role on all nodes
+      include_role:
+        name: mongodb_replica_role

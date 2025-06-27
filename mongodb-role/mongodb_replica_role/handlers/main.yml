@@ -1,0 +1,5 @@
+- name: Wait after MongoDB restart
+  wait_for:
+    host: localhost
+    port: "{{ mongodb_port }}"
+    timeout: 30
